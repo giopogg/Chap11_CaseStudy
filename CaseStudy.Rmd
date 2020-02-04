@@ -1,0 +1,173 @@
+---
+title: "Chap11"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Case study
+
+We study the distribution of the vegetation of Carpathian wetlands . The occurrences about vegetation of $30$ bryophytes plants together with environmental variables, recorded in $16 \ \text{m}^2$ plots from 70 fens (1 plot per locality) in the borderland between the Czech Republic and Slovakia. Water samples for consequent chemical analysis were taken in microsites best supplied by water from the central part of the fen, to obtain 14 chemical parameters of water ($Ca$, $Mg$, $Fe$, $K$, $Na$, $Si$, $SO_4$, $PO_4$, $NO_3$, $NH_3$, $Cl$, $Corg$, $pH$ and conductivity).
+
+
+```{r download,results='hide', warning=FALSE,message = FALSE}
+rm(list=ls())
+library(factoextra)
+library(Hmsc)
+library(knitr)
+library(corrplot)
+
+#data download
+bryo <- read.delim ('https://raw.githubusercontent.com/zdealveindy/anadat-r/master/data/bryophytes.txt', row.names = 1)
+vasc <- read.delim ('https://raw.githubusercontent.com/zdealveindy/anadat-r/master/data/vasc_plants.txt', row.names = 1)
+chem <- read.delim ('https://raw.githubusercontent.com/zdealveindy/anadat-r/master/data/chemistry.txt', row.names = 1)
+
+X<-as.data.frame(apply(chem[,1:14],MARGIN=2, scale))
+attach(X)
+
+set.seed(17121993)
+
+# info of data here: https://www.davidzeleny.net/anadat-r/doku.php/en:data:wetlands
+```
+
+## Select variables
+
+We apply a PCA to select the predictors. We choose $Corg$, $Mg$, $K$, $conduct$ after the PCA analyisis. We split the dataset to obtain a train and a test dataset ($70 \%$ and $30\%$ respectively).
+
+```{r var_selection, echo=FALSE}
+x.pca <- princomp(X)
+
+#We select 5 varibles
+fviz_eig(x.pca)
+
+
+#we might also take Corg, Mg, K, conduct
+fviz_pca_var(x.pca,
+             col.var = "contrib", # Color by contributions to the PC
+             gradient.cols = c("#00AFBB", "#E7B800", "#FC4E07"),
+             repel = TRUE     # Avoid text overlapping
+)
+
+train <- sample(1:nrow(X), floor(0.7*nrow(X)),replace=F)
+
+X_test <- X[-train,]
+X_train <- X[train,]
+
+Y <- as.matrix(bryo)
+Y_test <- Y[-train,]
+Y_train <- Y[train,]
+
+```
+
+## Model definition
+
+We include the quadratic terms of each variable to allow for local optima. We choose to model the response data with the Poisson distribution since we are modelling counts.
+
+```{r ,model_def, echo=TRUE}
+XFormula = ~ poly(Corg,degree=2) + poly(Mg,degree=2) + poly(K,degree=2) + poly(conduct, degree=2)
+
+studyDesign = data.frame(sample = as.factor(1:nrow(Y_train))) 
+rL = HmscRandomLevel(units = studyDesign$sample)
+
+m = Hmsc(Y = Y_train,
+       XData = X_train, XFormula = XFormula, ,ranLevels = list(sample = rL), studyDesign = studyDesign,
+       distr = "poisson")
+```
+
+## MCMC run
+We run two chains of the MCMC sampler, thinned to keep one every 10 samples, with 1000 elements of burn-in for a sample size of 20 00 .
+```{r ,mcmc, echo=TRUE, results='hide'}
+thin = 10
+samples = 1000
+nChains = 2
+
+m = sampleMcmc(m, samples = samples, thin = thin,
+               transient = 1000, nChains = nChains,verbose=1000, nParallel = nChains)
+```
+
+
+## Convergence analysis
+
+We evaluate MCMC convergence in terms of the parameters that we are especially interested in:  the species niches, given by the elements in matrix $\boldsymbol{B}$, and the residual species associations $\boldsymbol{Sigma}$. Globally the diagnosis shows a good MCMC convergence, as most potential scale reduction factors are close to one and effective sample sizes are relatively high.
+
+```{r ,conv_analysis, echo=TRUE}
+mpost = convertToCodaObject(m)
+par(mfrow=c(2,2))
+hist(effectiveSize(mpost$Beta), main="ess(beta)",xlab="") 
+hist(gelman.diag(mpost$Beta,multivariate=FALSE)$psrf, main="psrf(beta)",xlab="") 
+hist(effectiveSize(mpost$Omega[[1]]), main="ess(omega)",xlab="") 
+hist(gelman.diag(mpost$Omega[[1]],multivariate=FALSE)$psrf, main="psrf(omega)",xlab="")
+
+```
+
+## Posterior estimates: the regression coefficients
+
+We represent here the response of each species to the environement. We only show the coefficients whose credible interval does not overlap zero.
+```{r , beta_est , echo=TRUE}
+
+postBeta = getPostEstimate(m, parName="Beta")
+plotBeta(m, post=postBeta, param="Support", supportLevel = 0.95,cex = c(.35,.4,.5))
+```
+
+## Posterior estimates: species associations matrix
+
+The species associations matrix is represented here, by showing only those values of the association matrix whose credible intervals do not overlap zero.
+```{r , omega_est , echo=TRUE}
+OmegaCor = computeAssociations(m)
+supportLevel = 0.95
+
+toPlot = ((OmegaCor[[1]]$support>supportLevel)
+          + (OmegaCor[[1]]$support<(1-supportLevel))>0)*OmegaCor[[1]]$mean
+corrplot(toPlot, method = "color", col=colorRampPalette(c("blue","white","red"))(200), title=paste("Species associations matrix"), mar=c(0,0,1,0), type="lower",order = "hclust", tl.cex=0.5)
+
+```
+
+## Ordination
+
+We represent the species in a biplot whose axis are the two first latent factors. Species that are closer together are more correlated, and share the same response to the missing environmental variables that are represented by the values of the  
+
+```{r , ordination , echo=TRUE}
+etaPost = getPostEstimate(m, "Eta")
+lambdaPost=getPostEstimate(m, "Lambda")
+biPlot(m, etaPost = etaPost, lambdaPost=lambdaPost, factors=c(1,2))
+```
+
+## Model fit
+
+We evaluate model fit in terms of $R^2$ both on the training set and on cross validation on the training set.
+
+```{r , prediction , echo=TRUE, message=FALSE, warning=FALSE,results='hide'}
+preds = computePredictedValues(m)
+MF = evaluateModelFit(hM=m, predY=preds)
+
+partition = createPartition(m, nfolds = 2)
+preds = computePredictedValues(m, partition = partition, verbose=FALSE)
+CV = evaluateModelFit(hM = m, predY = preds)
+
+studyDesign_new = data.frame(sample = as.factor(1:nrow(X_test)))
+rL_new = HmscRandomLevel(units = studyDesign_new$sample) 
+#predict unconditional on test 
+Uncond=predict(m, XData= X_test, study=studyDesign_new, ranLevels = list(sample=rL_new), expected=F) 
+meanUncond = apply(simplify2array(Uncond), 1:2,mean) 
+
+pred_test = sqrt(colSums((meanUncond-Y_test)^2)/nrow(Y_test))
+
+
+```
+```{r , prediction _figure, echo=FALSE, message=FALSE, warning=FALSE}
+ggp = data.frame(value = c(MF$RMSE,CV$RMSE, pred_test),type=c(rep("Train",length(MF$C.RMSE)),rep("Cross Validation",length(CV$C.RMSE)), rep("Test", length(pred_test))))
+
+ggplot()+aes(x=ggp$value, fill=as.factor(ggp$type))+
+    geom_histogram(color="#e9ecef", alpha=0.4, position = 'identity') +
+    scale_fill_manual(values=c("#69b3a2", "#404080","#FF6666")) +
+    #theme_ipsum() +
+  
+    labs(fill="", xlabs=" ",title="RMSE")
+
+table = data.frame("Train RMSE"= mean(MF$RMSE), "CV RMSE" = mean(CV$RMSE), "pred RMSE"= mean(pred_test))
+kable(table)
+#to ggplot with two histograms superposed
+```
+
